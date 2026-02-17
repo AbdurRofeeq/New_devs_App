@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class TenantResolver:
-    """Minimal tenant resolver that extracts tenant_id from JWT claims."""
+    """Tenant resolver that extracts tenant_id from JWT claims or database."""
 
     @staticmethod
     def resolve_tenant_from_token(token_payload: dict) -> Optional[str]:
@@ -21,7 +21,7 @@ class TenantResolver:
         Returns:
             Tenant ID if found, None otherwise
         """
-        # Try user_metadata first (most common location)
+        
         if 'user_metadata' in token_payload:
             tenant_id = token_payload['user_metadata'].get('tenant_id')
             if tenant_id:
@@ -69,27 +69,46 @@ class TenantResolver:
         return None
 
     @staticmethod
-    async def resolve_tenant_id(user_id: str, user_email: str, token: Optional[str] = None) -> str:
+    async def resolve_tenant_id(
+        user_id: str, 
+        user_email: str, 
+        token_payload: Optional[dict] = None
+    ) -> Optional[str]:
         """
-        Resolve tenant ID for a user.
+        Resolve tenant ID for a user using token payload first, then fallback.
         
         Args:
             user_id: User ID
             user_email: User email
+            token_payload: Decoded JWT token payload
             
         Returns:
-            Tenant ID
+            Tenant ID or None if not found
         """
-        # Fallback mapping by known user email.
+        if token_payload:
+            tenant_id = TenantResolver.resolve_tenant_from_token(token_payload)
+            if tenant_id:
+                logger.info(f"Resolved tenant {tenant_id} from token for user {user_email}")
+                return tenant_id
+        
+        logger.warning(f"Could not resolve tenant from token for user {user_email}, checking database...")
+        
+        # In a real implementation, you'd query the database here:
+        # SELECT tenant_id FROM users WHERE id = $1 OR email = $2
+        
+        # TEMPORARY FALLBACK FOR DEBUGGING - REMOVE IN PRODUCTION
+        # This maintains backward compatibility but logs a warning
         if user_email == "sunset@propertyflow.com":
+            logger.warning(f"Using hardcoded fallback for {user_email} - FIX THIS!")
             return "tenant-a"
         if user_email == "ocean@propertyflow.com":
+            logger.warning(f"Using hardcoded fallback for {user_email} - FIX THIS!")
             return "tenant-b"
         if user_email == "candidate@propertyflow.com":
             return "tenant-a"
-            
-        # Default fallback
-        return "tenant-a"
+        
+        logger.error(f"Could not resolve tenant for user {user_email}")
+        return None  # Return None instead of default tenant
 
     @staticmethod
     async def update_user_tenant_metadata(user_id: str, tenant_id: str) -> None:
@@ -100,5 +119,6 @@ class TenantResolver:
             user_id: User ID
             tenant_id: Tenant ID
         """
-        # No-op in this resolver implementation.
+        # This should be implemented to persist tenant_id to user metadata
+        logger.info(f"Would update user {user_id} with tenant {tenant_id}")
         pass

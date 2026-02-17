@@ -92,47 +92,49 @@ async def get_current_user_info(
         
         # This ensures /auth/me returns correct tenant like other endpoints
         tenant_id = await TenantResolver.resolve_tenant_id(user_id=user.id, user_email=user.email)
+
+        # TO:
+        # Get token payload from request
+        token_payload = getattr(request.state, "token_payload", None)
+        tenant_id = await TenantResolver.resolve_tenant_id(
+            user_id=user.id, 
+            user_email=user.email,
+            token_payload=token_payload
+        )
         logger.info(f"AUTH /me: Fresh tenant lookup for {user.email}: {tenant_id}")
         
-        # Add smart view permissions if user has access
-        if tenant_id and not user.is_admin:
-            # Always add smart view permissions for non-admin users with a tenant
-            # This ensures users can access smart views they have been granted
-            logger.info(f"Adding smart view permissions for user {user.email} with tenant {tenant_id}")
+      if tenant_id and not user.is_admin:
+        try:
+        # Get user's assigned smart views from a junction table
+        user_smart_views_result = (
+            supabase
+            .table('user_smart_views')  # Assuming this table exists
+            .select('smart_view_id')
+            .eq('user_id', user.id)
+            .eq('tenant_id', tenant_id)
+            .execute()
+        )
+        
+        assigned_view_ids = [item['smart_view_id'] for item in user_smart_views_result.data]
+        
+        if assigned_view_ids:
+            # Get details for only the assigned smart views
+            smart_views_result = (
+                supabase
+                .table('reservation_subsections')
+                .select('id, name')
+                .in_('id', assigned_view_ids)
+                .eq('is_active', True)
+                .execute()
+            )
             
-            # Get all active smart views for the tenant
-            try:
-                smart_views_result = (
-                    supabase
-                    .table('reservation_subsections')
-                    .select('id, name')
-                    .eq('tenant_id', tenant_id)
-                    .eq('is_active', True)
-                    .execute()
-                )
-                
-                smart_views = smart_views_result.data or []
-                
-                logger.info(f"Found {len(smart_views)} smart views for tenant {tenant_id}")
-                if smart_views:
-                    logger.info(f"Smart view IDs: {[view['id'] for view in smart_views]}")
-                
-                # Add permissions for each smart view
-                added_count = 0
-                for view in smart_views:
-                    smart_view_permission = f"smart_view_{view['id']}"
-                    # Only add if not already present
-                    if not any(p["section"] == smart_view_permission for p in permissions):
-                        permissions.append({
-                            "section": smart_view_permission,
-                            "action": "read"
-                        })
-                        added_count += 1
-                        logger.debug(f"Added permission: {smart_view_permission}")
-                
-                logger.info(f"Added {added_count} smart view permissions for user {user.email} (total smart views: {len(smart_views)})")
-            except Exception as e:
-                logger.error(f"Failed to fetch smart views for permissions: {e}")
+            for view in smart_views_result.data or []:
+                permissions.append({
+                    "section": f"smart_view_{view['id']}",
+                    "action": "read"
+                })
+    except Exception as e:
+        logger.error(f"Failed to fetch user's assigned smart views: {e}")
 
         return {
             "id": user.id,

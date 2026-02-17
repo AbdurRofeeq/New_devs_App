@@ -8,29 +8,41 @@ CREATE TABLE tenants (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Properties Table
+-- Properties Table - FIXED
 CREATE TABLE properties (
-    id TEXT NOT NULL, -- Not PK solely, might be composite with tenant in real world, but strict ID here
-    tenant_id TEXT REFERENCES tenants(id),
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,  -- Use UUID, no more duplicate IDs!
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    property_code TEXT NOT NULL,  -- Store the original "101" as a code, not as ID
     name TEXT NOT NULL,
     timezone TEXT NOT NULL DEFAULT 'UTC',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    PRIMARY KEY (id, tenant_id)
+    UNIQUE(tenant_id, property_code)  -- Ensure uniqueness per tenant
 );
 
--- Reservations Table
+-- Reservations Table - FIXED
 CREATE TABLE reservations (
-    id TEXT PRIMARY KEY,
-    property_id TEXT,
-    tenant_id TEXT REFERENCES tenants(id),
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    property_id UUID NOT NULL REFERENCES properties(id),
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
     check_in_date TIMESTAMP WITH TIME ZONE NOT NULL,
     check_out_date TIMESTAMP WITH TIME ZONE NOT NULL,
-    total_amount NUMERIC(10, 3) NOT NULL, -- storing as numeric with 3 decimals to allow sub-cent precision tracking
+    total_amount NUMERIC(10, 2) NOT NULL,  -- CHANGED to 2 decimal places!
     currency TEXT DEFAULT 'USD',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    FOREIGN KEY (property_id, tenant_id) REFERENCES properties(id, tenant_id)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add indexes for performance
+CREATE INDEX idx_reservations_tenant_id ON reservations(tenant_id);
+CREATE INDEX idx_reservations_property_id ON reservations(property_id);
+CREATE INDEX idx_reservations_dates ON reservations(check_in_date, check_out_date);
 
 -- RLS Policies (Simulation)
 ALTER TABLE properties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reservations ENABLE ROW LEVEL SECURITY;
+
+-- Create policy to ensure tenant isolation
+CREATE POLICY tenant_isolation_properties ON properties
+    USING (tenant_id = current_setting('app.current_tenant')::TEXT);
+
+CREATE POLICY tenant_isolation_reservations ON reservations
+    USING (tenant_id = current_setting('app.current_tenant')::TEXT);

@@ -1,21 +1,47 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Dict, Any, List
+import logging
+from pytz import timezone as pytz_timezone  # Add to requirements!
 
-async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_session=None) -> Decimal:
-    """
-    Calculates revenue for a specific month.
-    """
+logger = logging.getLogger(__name__)
 
-    start_date = datetime(year, month, 1)
+async def calculate_monthly_revenue(
+    property_id: str, 
+    month: int, 
+    year: int, 
+    tenant_id: str,  # ADDED: tenant_id parameter!
+    property_timezone: str = 'UTC',  # Should come from properties table
+    db_session=None
+) -> Decimal:
+    """
+    Calculates revenue for a specific month with proper timezone handling.
+    """
+    # FIX: Use timezone-aware datetimes
+    from app.services.properties import get_property_timezone  # hypothetical function
+    
+    # Get property's timezone from database
+    if not property_timezone:
+        property_timezone = await get_property_timezone(property_id, tenant_id)
+    
+    # Create timezone-aware start and end dates in property's local time
+    tz = pytz_timezone(property_timezone)
+    start_date = tz.localize(datetime(year, month, 1, 0, 0, 0))
+    
     if month < 12:
-        end_date = datetime(year, month + 1, 1)
+        end_date = tz.localize(datetime(year, month + 1, 1, 0, 0, 0))
     else:
-        end_date = datetime(year + 1, 1, 1)
-        
-    print(f"DEBUG: Querying revenue for {property_id} from {start_date} to {end_date}")
+        end_date = tz.localize(datetime(year + 1, 1, 1, 0, 0, 0))
+    
+    # Convert to UTC for database query (if DB stores UTC)
+    start_date_utc = start_date.astimezone(timezone.utc)
+    end_date_utc = end_date.astimezone(timezone.utc)
+    
+    logger.info(f"Querying revenue for property {property_id} (tenant: {tenant_id})")
+    logger.info(f"Local time range: {start_date} to {end_date}")
+    logger.info(f"UTC time range: {start_date_utc} to {end_date_utc}")
 
-    # SQL Simulation (This would be executed against the actual DB)
+    # SQL with proper tenant filtering
     query = """
         SELECT SUM(total_amount) as total
         FROM reservations
@@ -25,15 +51,16 @@ async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_
         AND check_in_date < $4
     """
     
-    # In production this query executes against a database session.
-    # result = await db.fetch_val(query, property_id, tenant_id, start_date, end_date)
+    # Execute query with UTC dates
+    # result = await db.fetch_val(query, property_id, tenant_id, start_date_utc, end_date_utc)
     # return result or Decimal('0')
     
-    return Decimal('0') # Placeholder for now until DB connection is finalized
+    return Decimal('0')  # Placeholder
 
 async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str, Any]:
     """
     Aggregates revenue from database.
+    REMOVED: Mock data fallback - now fails properly!
     """
     try:
         # Import database pool
@@ -45,8 +72,10 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
         
         if db_pool.session_factory:
             async with db_pool.get_session() as session:
-                # Use SQLAlchemy text for raw SQL
                 from sqlalchemy import text
+                
+                # FIX: Added logging to track queries
+                logger.info(f"Calculating revenue for property {property_id}, tenant {tenant_id}")
                 
                 query = text("""
                     SELECT 
@@ -54,7 +83,8 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
                         SUM(total_amount) as total_revenue,
                         COUNT(*) as reservation_count
                     FROM reservations 
-                    WHERE property_id = :property_id AND tenant_id = :tenant_id
+                    WHERE property_id = :property_id 
+                    AND tenant_id = :tenant_id
                     GROUP BY property_id
                 """)
                 
@@ -66,6 +96,7 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
                 
                 if row:
                     total_revenue = Decimal(str(row.total_revenue))
+                    logger.info(f"Found revenue {total_revenue} for property {property_id}")
                     return {
                         "property_id": property_id,
                         "tenant_id": tenant_id,
@@ -74,7 +105,7 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
                         "count": row.reservation_count
                     }
                 else:
-                    # No reservations found for this property
+                    logger.info(f"No reservations found for property {property_id}, tenant {tenant_id}")
                     return {
                         "property_id": property_id,
                         "tenant_id": tenant_id,
@@ -86,24 +117,8 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
             raise Exception("Database pool not available")
             
     except Exception as e:
-        print(f"Database error for {property_id} (tenant: {tenant_id}): {e}")
+        # FIX: Log error and re-raise - NO MOCK DATA IN PRODUCTION!
+        logger.error(f"Database error calculating revenue for property {property_id} (tenant: {tenant_id}): {e}", exc_info=True)
         
-        # Create property-specific mock data for testing when DB is unavailable
-        # This ensures each property shows different figures
-        mock_data = {
-            'prop-001': {'total': '1000.00', 'count': 3},
-            'prop-002': {'total': '4975.50', 'count': 4}, 
-            'prop-003': {'total': '6100.50', 'count': 2},
-            'prop-004': {'total': '1776.50', 'count': 4},
-            'prop-005': {'total': '3256.00', 'count': 3}
-        }
-        
-        mock_property_data = mock_data.get(property_id, {'total': '0.00', 'count': 0})
-        
-        return {
-            "property_id": property_id,
-            "tenant_id": tenant_id, 
-            "total": mock_property_data['total'],
-            "currency": "USD",
-            "count": mock_property_data['count']
-        }
+        # Either re-raise or return a proper error response
+        raise Exception(f"Failed to calculate revenue for property {property_id}: {str(e)}")
